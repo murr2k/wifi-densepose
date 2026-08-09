@@ -17,6 +17,17 @@ REM   run.cmd --bind-addr 0.0.0.0         (expose on the LAN; loopback by defaul
 
 setlocal
 set "ROOT=%~dp0"
+
+REM Multistatic fusion guard (#1049). The published 60 ms default assumes a real
+REM ADR-029 TDM slot schedule, but tdm_slot/tdm_nodes are parsed and validated in
+REM the firmware's nvs_config.c and consumed nowhere else, so no slot gating
+REM exists in the capture path. Two independently-clocked boards synced only by
+REM the 100 ms ESP-NOW beacon drift 10-150 ms; measured spread on this pair is
+REM 61-140 ms, which trips the default and makes every fusion cycle fail. Lift
+REM the hard guard past the measured spread, per the upstream escape hatch.
+REM Remove these two lines if firmware-side TDM ever lands.
+set "WDP_GUARD_INTERVAL_US=200000"
+set "WDP_SOFT_GUARD_US=100000"
 set "EXE=%ROOT%v2\target\release\sensing-server.exe"
 if not exist "%EXE%" set "EXE=%ROOT%v2\target\debug\sensing-server.exe"
 
@@ -35,9 +46,16 @@ if not exist "%EXE%" (
 )
 
 echo [run.cmd] %EXE%
-echo [run.cmd] UI  -^> http://localhost:8774
-echo [run.cmd] WS  -^> ws://localhost:8775
-echo [run.cmd] CSI -^> UDP 5005 ^(inbound rule required; see README notes^)
+echo [run.cmd] UI   -^> http://localhost:8774/ui/index.html
+echo [run.cmd] WS   -^> ws://localhost:8775/ws/sensing
+echo [run.cmd] CSI  -^> UDP 5005 ^(inbound rule required; see CLAUDE.md notes^)
+echo.
+REM ui/services/sensing.service.js derives the WS port from the HTTP port via a
+REM lookup table that only knows 3000-^>3001 and 8080-^>8765. On 8774 it falls
+REM through to ws://localhost:8774, which is wrong, so the pages that stream
+REM sensing data need the ?ws= override documented in ui/viz.html.
+echo [run.cmd] 3D viz ^(needs the ?ws= override, and unpkg.com for three.js^):
+echo [run.cmd]   http://localhost:8774/ui/viz.html?ws=ws://localhost:8775/ws/sensing
 echo.
 
 REM --ui-path is passed explicitly: the binary's default is "../ui", which is

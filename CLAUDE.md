@@ -310,6 +310,42 @@ rather than through an agent transcript. It leaves the password in cleartext at
 afterwards. In-repo artifacts (`nvs_config.csv`, `nvs_*.bin`) are gitignored.
 On-device NVS is unencrypted (`CONFIG_NVS_ENCRYPTION` unset).
 
+### ADR-029 TDM is not implemented in firmware
+
+`tdm_slot`/`tdm_nodes` provision successfully and appear in the boot log, which
+makes them look functional. They are not. `tdm_slot_index` and `tdm_node_count`
+are declared in `main/nvs_config.h`, parsed and range-validated in
+`main/nvs_config.c`, and read by no other translation unit: there is no slot
+gating anywhere in the capture path. Provisioning TDM slots to fix multistatic
+timing is a no-op that costs a reboot per node. Verify with:
+
+```bash
+grep -rn "tdm_slot_index\|tdm_node_count" firmware/esp32-csi-node/main/
+```
+
+Consequently the server's published 60 ms fusion guard, which assumes a real TDM
+slot schedule, is unreachable with this firmware. Two boards synced only by the
+100 ms ESP-NOW beacon drift 10-150 ms by upstream's own estimate
+(`v2/crates/wifi-densepose-sensing-server/src/main.rs`, the
+`multistatic_guard_config_from_env` doc comment, issue #1049). A measured pair
+here spread 61-140 ms typical with a tail past 210 ms, so every fusion cycle
+failed with `Timestamp spread N us exceeds guard interval 60000 us` at about
+54 errors/min. Lifting the guard to 200 ms hard / 100 ms soft (set in `run.cmd`)
+cut that to about 2.7 errors/min, roughly 99.5 % of cycles fusing.
+
+Two cautions. First, the warning is rate-limited to one per 10 s, so counting
+log lines undercounts badly; read `engine_error_count` from `/api/v1/status`
+instead. Second, raising the guard further silences warnings while admitting
+looser-aligned frames, so fused output here supports coarse multistatic presence,
+not precise positioning. Remove the `run.cmd` overrides if firmware TDM lands.
+
+A leader node reports `smoothed=false` in `/api/v1/mesh` permanently. That is
+expected: the leader is the time reference (`offset_us` near 0) and has nothing
+to smooth against. Only followers seed the EMA. Likewise a follower's
+`offset_us` approximates its own uptime, because the sync exchanges
+`esp_timer` values and the offset is the boot-epoch correction, not an error
+term.
+
 ### Observed wire-format drift
 
 Firmware v0.8.4 emits three magics absent from the firmware README's protocol
