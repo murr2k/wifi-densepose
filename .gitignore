@@ -298,4 +298,9 @@ ruvector.db
 # sensing-server runtime artifacts written by its test suite (trained model
 # snapshots + the generated session-secret) — never tracked
 v2/crates/wifi-densepose-sensing-server/data/
+# The same secret is written relative to the *launch* directory, so running the
+# binary from the repo root (README `cargo run`, or run.cmd) lands it in
+# ./data/session-secret, outside the crate-scoped rule above. Match at any depth
+# so no launch directory can leak it.
+**/data/session-secret
 *.proptest-regressions

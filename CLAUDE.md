@@ -228,6 +228,96 @@ Follow `firmware/esp32-csi-node/README.md` and local machine notes. Confirm the
 port and target before flashing. Never expose WiFi credentials in commands,
 logs, issues, or commits.
 
+## Local machine notes (murr2k fork, Windows 11)
+
+Fork-local hardware facts, verified on real silicon 2026-08-09. This fork does
+not contribute upstream, so this section stays here rather than in a side file.
+
+### The board
+
+| Item | Value |
+|---|---|
+| Board | ESP32-S3-DevKitC-1, **no display panel** |
+| Chip | ESP32-S3 QFN56 rev v0.2, 8 MB quad flash, 8 MB embedded PSRAM |
+| MAC | see `CLAUDE.local.md` (untracked) |
+| Flash/monitor port | **COM8** (Silicon Labs CP210x). Use this for everything. |
+| Native USB port | Re-enumerates on reflash (PID `0x4001` factory TinyUSB, `0x1001` once this firmware runs). Not used. |
+
+### Display-less builds are mandatory here
+
+`CONFIG_DISPLAY_ENABLE` defaults to `y`. On this panel-less board the ADR-045
+runtime probe false-positives, `main.c` skips the RuView#893 MGMT+DATA
+promiscuous upgrade, and **CSI yield collapses to 0 pps**. Always build with the
+`devkitc` overlay:
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -v "$(pwd)/firmware/esp32-csi-node:/project" -w /project \
+  espressif/idf:v5.4 bash -c \
+  "rm -rf build sdkconfig && \
+   idf.py -DSDKCONFIG_DEFAULTS='sdkconfig.defaults;sdkconfig.defaults.devkitc' set-target esp32s3 && \
+   idf.py -DSDKCONFIG_DEFAULTS='sdkconfig.defaults;sdkconfig.defaults.devkitc' build"
+```
+
+Confirm success in the boot log: `CSI filter upgraded to MGMT+DATA (no display,
+RuView#893)`. Do not flash `release_bins/esp32-csi-node.bin` (8 MB prebuilt): it
+has display compiled in and hits the 0 pps trap. The 4 MB prebuilt has display
+off but predates the LWIP `sendto` ENOMEM buffer fix.
+
+### Network and ports
+
+| Item | Value |
+|---|---|
+| Host aggregator | `<HOST_IP>` on Ethernet 2 (see `CLAUDE.local.md`) |
+| Node (DHCP) | `<NODE_IP>`, channel 6, RSSI about -47 to -54 dBm |
+| Sensing server HTTP/UI | **8774** (binary default 8080 is outside the pool) |
+| Sensing server WebSocket | **8775** (binary default 8765 is outside the pool) |
+| CSI ingest | UDP **5005**, fixed by the ADR-018 wire protocol |
+
+Both TCP ports are allocated in `~/.claude/port-registry.md`. Launch with
+`run.cmd` at the repo root, which pins the ports, passes an absolute
+`--ui-path` (the binary's `../ui` default resolves outside the repo when
+launched from root), and sets `--no-edge-registry`.
+
+### Firewall trap (cost an hour once)
+
+`Ethernet 2` is classified **Public**, so a rule scoped `Domain,Private` never
+applies and the server silently receives nothing while `netstat -s -p UDP` still
+counts the datagrams (WFP drops after the UDP counter). `python.exe` has
+standing Public allow rules, so a Python probe receives frames while
+`sensing-server.exe` does not: that asymmetry is the tell, not evidence of a
+server bug. Required rule:
+
+```powershell
+Set-NetFirewallRule -DisplayName "ESP32 CSI UDP 5005" `
+  -Profile Any -RemoteAddress <LAN_CIDR>
+```
+
+Scoping `-RemoteAddress` to the LAN keeps 5005 closed on a genuinely public
+network. Concrete values for this machine are in `CLAUDE.local.md`.
+
+### Host toolchain
+
+Project `.venv` holds `esptool`, `pyserial`, and `esp-idf-nvs-partition-gen`
+(`provision.py` needs the last one or it silently degrades to a CSV fallback).
+Docker image `espressif/idf:v5.4`, matching what CI pins.
+
+### Credential handling
+
+`provision.py` takes `--ssid`/`--password` as CLI flags only, so run it by hand
+rather than through an agent transcript. It leaves the password in cleartext at
+`%APPDATA%\wifi-densepose\esp32-provision-state\<PORT>.json`; delete that file
+afterwards. In-repo artifacts (`nvs_config.csv`, `nvs_*.bin`) are gitignored.
+On-device NVS is unencrypted (`CONFIG_NVS_ENCRYPTION` unset).
+
+### Observed wire-format drift
+
+Firmware v0.8.4 emits three magics absent from the firmware README's protocol
+table: `0xC5110003` (48 B), `0xC5110006` (60 B), `0xC511A110` (32 B). CSI frames
+carry 128 subcarriers, not the documented 64 (276 B = 20 + 1 * 128 * 2). The
+server ignores the unknown magics harmlessly. Treat the README's table as
+describing v0.6.5.
+
 ## References
 
 - `harness/ruview/README.md` — commands and contributor workflow
