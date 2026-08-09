@@ -333,11 +333,40 @@ failed with `Timestamp spread N us exceeds guard interval 60000 us` at about
 54 errors/min. Lifting the guard to 200 ms hard / 100 ms soft (set in `run.cmd`)
 cut that to about 2.7 errors/min, roughly 99.5 % of cycles fusing.
 
+Measured fusion rejection rate as boards were added, same room, channel 6:
+
+| Nodes | Guard | Errors/min | Notes |
+|---|---|---|---|
+| 2 | 60 ms (default) | 54.1 | every cycle fails |
+| 2 | 200 ms | 2.7 | ~99.5 % of cycles fuse |
+| 3 | 200 ms | 18.7 | ~97 % of cycles fuse |
+
+Spread distribution of the *failing* cycles at 3 nodes (censored: only >200 ms is
+logged) was min 200.9 ms, p50 215.3 ms, p90 296.6 ms, max 2982.7 ms. That 2.98 s
+outlier is a real multi-second node stall, not jitter, and is worth watching if
+it recurs.
+
+The third node cost 7x more rejections because spread is max-minus-min across the
+whole participating set, so each added board can only widen it. This scales
+badly: do not expect any sane guard to hold a 5-6 node mesh on ESP-NOW sync
+alone. That is the argument for implementing firmware TDM rather than continuing
+to raise the guard.
+
+Resist raising it past 200 ms. At 200 ms a person walking 1.4 m/s has moved about
+28 cm across the fused window; at 300 ms about 42 cm. Beyond that the guard stops
+being noise suppression and becomes the only thing preventing fusion from
+averaging a moving target into mush, so a few percent rejections are correct
+behaviour rather than a number to tune away.
+
 Two cautions. First, the warning is rate-limited to one per 10 s, so counting
 log lines undercounts badly; read `engine_error_count` from `/api/v1/status`
-instead. Second, raising the guard further silences warnings while admitting
-looser-aligned frames, so fused output here supports coarse multistatic presence,
-not precise positioning. Remove the `run.cmd` overrides if firmware TDM lands.
+instead. Second, a node that fails to associate gives up permanently after 10
+retries and does not rescan, so it needs a reset after any AP-side fix. Remove
+the `run.cmd` overrides if firmware TDM lands.
+
+Per-node CSI rate *rises* as boards are added (31.6 fps solo, 40 with two, 51
+with three on the same node): the boards mutually illuminate, so each has more
+frames to capture. Adding nodes costs fusion alignment, not capture rate.
 
 A leader node reports `smoothed=false` in `/api/v1/mesh` permanently. That is
 expected: the leader is the time reference (`offset_us` near 0) and has nothing
