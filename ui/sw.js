@@ -5,7 +5,14 @@
 // that ran it hold a permanently signed-out answer. `activate` deletes every
 // cache whose name is not CACHE_NAME, so bumping is what evicts it from clients
 // already in the field. Bump again if a future change poisons the cache.
-const CACHE_NAME = 'ruview-v2';
+//
+// Bumped to v3: `/services/sensing.service.js` is precached below, and its
+// HTTP-to-WS port table gained an 8774 -> 8775 entry. Browsers holding the v2
+// copy resolve the sensing WebSocket to the HTTP port, fail the reconnect
+// budget, and fall back to client-side simulation — the Sensing tab then reads
+// "OFFLINE — CLIENT SIMULATION" while the server is happily serving live ESP32
+// frames. Any future edit to a precached asset needs a bump for the same reason.
+const CACHE_NAME = 'ruview-v3';
 
 // Requests whose response depends on the caller's credentials. These must never
 // be served from the Cache API.

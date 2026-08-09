@@ -375,6 +375,58 @@ to smooth against. Only followers seed the EMA. Likewise a follower's
 `esp_timer` values and the offset is the boot-epoch correction, not an error
 term.
 
+### UI liveness banners and the `metadata.mock_data` contract
+
+Two different components report live-versus-mock and they disagree, so name the
+page before trusting a banner:
+
+| Banner text | Component | Meaning |
+|---|---|---|
+| `LIVE — ESP32 HARDWARE` | `ui/components/SensingTab.js` | honest; driven by the server's `source` |
+| `OFFLINE — CLIENT SIMULATION` | same | browser gave up reconnecting and is faking locally |
+| `MOCK DATA - DEMO MODE` | `ui/components/dashboard-hud.js`, used by `ui/viz.html` | driven by `metadata.mock_data` |
+
+`websocket-client.js` sets `isRealData` **only** from `metadata.mock_data`, a
+field the original Python backend emitted. The Rust server signals liveness via
+`source` instead, so before the `sensing_update_value` helper the field was
+absent, `isRealData` stayed false forever, and `viz.html`'s HUD read
+`MOCK DATA - DEMO MODE` against live hardware with no way to clear it (it gates
+on `wsClient.isRealData && !isDemoMode`). The server now injects
+`metadata: { mock_data, source }` at serialisation on both the WebSocket and
+`/api/v1/sensing/latest`. `esp32:offline` counts as real, not mock: that is live
+hardware gone stale.
+
+`viz.html` also keeps its own demo flag, which starts **on**, only clears when a
+frame carries `persons.length > 0`, returns on any disconnect, and toggles on the
+**`d` key**. Pressing `d` while clicking around silently flips it.
+
+Node marker positions come from `--node-positions` / `SENSING_NODE_POSITIONS` as
+`id:x,y,z`, keyed by node id because the node set is discovered at runtime and is
+not ordered by id. The renderer maps `position[0]` to scene X and `position[2]`
+to scene Z and ignores `position[1]`. Only the Sensing tab draws these markers;
+`viz.html` ignores node positions entirely. These coordinates are **declared
+ground truth, not a measurement** — nodes do not self-locate, so the markers say
+which blob is which board and nothing more. Stale coordinates after moving a
+board make the display actively wrong.
+
+### Host workflow hazards on Windows
+
+- **Editing a precached UI asset requires bumping `CACHE_NAME` in `ui/sw.js`.**
+  The service worker precaches `services/*.js` and `components/*.js`; its
+  `activate` deletes every cache whose name differs, so the bump is the only
+  eviction mechanism. Without it, a browser that has visited before keeps the old
+  file and the change silently never lands.
+- **`cargo build` fails at the link step while the server is running**, with
+  `error: failed to remove file ... sensing-server.exe` and `Access is denied.
+  (os error 5)`. Compilation output above it looks clean, so it reads as a
+  mystery failure. Stop the server first.
+- **`Stop-Process` on `sensing-server` is not enough.** `run.cmd` runs under a
+  `cmd.exe /c` wrapper with sibling children that keep the binary open. Use
+  `taskkill /PID <cmd-pid> /T /F` on the wrapper.
+- `provision.py`'s per-port state file cannot be created for `COM1`-`COM9`
+  through a normal path: Windows reserves those names *with any extension*. Use
+  the `\\?\` extended-length prefix. `COM10`+ are unaffected.
+
 ### Observed wire-format drift
 
 Firmware v0.8.4 emits three magics absent from the firmware README's protocol

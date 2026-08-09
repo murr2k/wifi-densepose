@@ -327,6 +327,109 @@ struct SensingUpdate {
     node_features: Option<Vec<PerNodeFeatureInfo>>,
 }
 
+/// Fallback room position reported for a node with no configured coordinates.
+/// Historically every node reported this constant, which stacked all markers on
+/// one point in any UI that renders `NodeInfo::position` (the Sensing tab's
+/// `GaussianSplatRenderer` maps `position[0]` to scene X and `position[2]` to
+/// scene Z).
+const DEFAULT_NODE_POSITION: [f64; 3] = [2.0, 0.0, 1.5];
+
+/// Room positions from `--node-positions`, keyed by node id.
+///
+/// Populated only when entries carry an explicit `id:x,y,z` prefix. Bare
+/// `x,y,z` entries keep their original ordinal meaning and feed
+/// `MultistaticFuser::set_node_positions` alone, so existing deployments are
+/// unaffected. Keying by id matters because the node set is discovered at
+/// runtime and is not ordered by id — a live three-node payload has been
+/// observed listing nodes as 1, 3, 2, which would misassign ordinal positions.
+static NODE_POSITIONS_BY_ID: std::sync::OnceLock<HashMap<u8, [f64; 3]>> =
+    std::sync::OnceLock::new();
+
+/// Parse `id:x,y,z;id:x,y,z` entries. Entries without an `id:` prefix, with the
+/// wrong arity, or with unparseable numbers are skipped, so a malformed field
+/// degrades to the default position rather than failing startup.
+fn parse_node_positions_by_id(input: &str) -> HashMap<u8, [f64; 3]> {
+    let mut out = HashMap::new();
+    for entry in input.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((id_part, coords)) = entry.split_once(':') else {
+            continue;
+        };
+        let Ok(id) = id_part.trim().parse::<u8>() else {
+            tracing::warn!("Skipping node position with unparseable id: '{entry}'");
+            continue;
+        };
+        let parts: Vec<&str> = coords.split(',').collect();
+        if parts.len() != 3 {
+            tracing::warn!("Skipping node position '{entry}' (expected id:x,y,z)");
+            continue;
+        }
+        match (
+            parts[0].trim().parse::<f64>(),
+            parts[1].trim().parse::<f64>(),
+            parts[2].trim().parse::<f64>(),
+        ) {
+            (Ok(x), Ok(y), Ok(z)) => {
+                out.insert(id, [x, y, z]);
+            }
+            _ => tracing::warn!("Skipping node position '{entry}' (unparseable coordinate)"),
+        }
+    }
+    out
+}
+
+/// Room position to report for `id`, falling back to [`DEFAULT_NODE_POSITION`].
+fn node_position_for(id: u8) -> [f64; 3] {
+    NODE_POSITIONS_BY_ID
+        .get()
+        .and_then(|m| m.get(&id).copied())
+        .unwrap_or(DEFAULT_NODE_POSITION)
+}
+
+/// True when `source` denotes synthetic data.
+///
+/// `esp32:offline` is real hardware data that has merely gone stale, so it is
+/// deliberately not mock.
+fn source_is_mock(source: &str) -> bool {
+    matches!(source, "simulated" | "simulate" | "mock")
+}
+
+/// Serialise a [`SensingUpdate`] to JSON with a `metadata` object attached.
+///
+/// `ui/services/websocket-client.js` and `ui/services/data-processor.js` decide
+/// live-versus-mock solely from `metadata.mock_data`, a field the original
+/// Python backend emitted and this server never has. Without it `isRealData`
+/// initialises false and is never assigned, so `ui/viz.html`'s HUD reports
+/// "MOCK DATA - DEMO MODE" against live hardware with no way to clear it —
+/// `viz.html` gates the banner on `wsClient.isRealData && !isDemoMode`, and the
+/// first term can never become true.
+///
+/// Injected here at serialisation rather than added to the struct so the six
+/// `SensingUpdate` construction sites and their tests stay untouched. `source`
+/// is duplicated into the object because the client checks
+/// `metadata.source !== 'mock'` on one of its two branches.
+fn sensing_update_value(update: &SensingUpdate) -> serde_json::Value {
+    let mut value = serde_json::to_value(update).unwrap_or_default();
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "metadata".to_string(),
+            serde_json::json!({
+                "mock_data": source_is_mock(&update.source),
+                "source": update.source,
+            }),
+        );
+    }
+    value
+}
+
+/// [`sensing_update_value`] rendered to a string for WebSocket broadcast.
+fn sensing_update_json(update: &SensingUpdate) -> Option<String> {
+    serde_json::to_string(&sensing_update_value(update)).ok()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NodeInfo {
     node_id: u8,
@@ -2844,7 +2947,7 @@ async fn windows_wifi_task(state: SharedState, tick_ms: u64) {
         // #1050: attach real signal_field-peak positions to each person.
         attach_field_positions(&mut update);
 
-        if let Ok(json) = serde_json::to_string(&update) {
+        if let Some(json) = sensing_update_json(&update) {
             let _ = s.tx.send(json);
         }
         observe_sensing_update(s.latest_update.as_ref(), &update);
@@ -3000,7 +3103,7 @@ async fn windows_wifi_fallback_tick(state: &SharedState, seq: u32) {
     // #1050: attach real signal_field-peak positions to each person.
     attach_field_positions(&mut update);
 
-    if let Ok(json) = serde_json::to_string(&update) {
+    if let Some(json) = sensing_update_json(&update) {
         let _ = s.tx.send(json);
     }
     observe_sensing_update(s.latest_update.as_ref(), &update);
@@ -3538,7 +3641,10 @@ async fn health(State(state): State<SharedState>) -> Json<serde_json::Value> {
 async fn latest(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let s = state.read().await;
     match &s.latest_update {
-        Some(update) => Json(serde_json::to_value(update).unwrap_or_default()),
+        // Same `metadata` injection as the WebSocket path, so a client polling
+        // this endpoint reaches the same live-versus-mock verdict as one reading
+        // the stream.
+        Some(update) => Json(sensing_update_value(update)),
         None => Json(serde_json::json!({"status": "no data yet"})),
     }
 }
@@ -5944,7 +6050,7 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         .map(|(&id, n)| NodeInfo {
                             node_id: id,
                             rssi_dbm: n.rssi_history.back().copied().unwrap_or(0.0),
-                            position: [2.0, 0.0, 1.5],
+                            position: node_position_for(id),
                             amplitude: vec![],
                             subcarrier_count: 0,
                             // Vitals-only path; still expose the sync snapshot
@@ -6057,7 +6163,7 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                     // #1050: attach real signal_field-peak positions to each person.
                     attach_field_positions(&mut update);
 
-                    if let Ok(json) = serde_json::to_string(&update) {
+                    if let Some(json) = sensing_update_json(&update) {
                         let _ = s.tx.send(json);
                     }
                     observe_sensing_update(s.latest_update.as_ref(), &update);
@@ -6423,7 +6529,7 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         .map(|(&id, n)| NodeInfo {
                             node_id: id,
                             rssi_dbm: n.rssi_history.back().copied().unwrap_or(0.0),
-                            position: [2.0, 0.0, 1.5],
+                            position: node_position_for(id),
                             amplitude: if suppress_raw {
                                 vec![]
                             } else {
@@ -6494,7 +6600,7 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                     // #1050: attach real signal_field-peak positions to each person.
                     attach_field_positions(&mut update);
 
-                    if let Ok(json) = serde_json::to_string(&update) {
+                    if let Some(json) = sensing_update_json(&update) {
                         let _ = s.tx.send(json);
                     }
 
@@ -6755,7 +6861,7 @@ async fn simulated_data_task(state: SharedState, tick_ms: u64) {
         if update.classification.presence {
             s.total_detections += 1;
         }
-        if let Ok(json) = serde_json::to_string(&update) {
+        if let Some(json) = sensing_update_json(&update) {
             let _ = s.tx.send(json);
         }
         observe_sensing_update(s.latest_update.as_ref(), &update);
@@ -8052,7 +8158,31 @@ async fn main() {
                 ..cfg.clone()
             });
             if let Some(ref pos_str) = args.node_positions {
-                let positions = field_bridge::parse_node_positions(pos_str);
+                // `id:x,y,z` entries bind coordinates to a specific node, which
+                // also lets NodeInfo::position report them per node. Bare
+                // `x,y,z` keeps the original ordinal behaviour.
+                let by_id = parse_node_positions_by_id(pos_str);
+                let positions = if by_id.is_empty() {
+                    field_bridge::parse_node_positions(pos_str)
+                } else {
+                    let mut ids: Vec<u8> = by_id.keys().copied().collect();
+                    ids.sort_unstable();
+                    let ordered: Vec<[f32; 3]> = ids
+                        .iter()
+                        .map(|id| {
+                            let p = by_id[id];
+                            [p[0] as f32, p[1] as f32, p[2] as f32]
+                        })
+                        .collect();
+                    for id in &ids {
+                        let p = by_id[id];
+                        info!("Node {id} position: [{}, {}, {}] m", p[0], p[1], p[2]);
+                    }
+                    if NODE_POSITIONS_BY_ID.set(by_id).is_err() {
+                        warn!("Node positions already initialised; keeping the first set");
+                    }
+                    ordered
+                };
                 if !positions.is_empty() {
                     info!(
                         "Configured {} node positions for multistatic fusion",

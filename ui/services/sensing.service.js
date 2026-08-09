@@ -15,6 +15,10 @@ const SENSING_WS_PORT_BY_HTTP_PORT = {
   '3000': '3001',
   // Python sensing stack: UI on 8080, sensing stream on 8765.
   '8080': '8765',
+  // Rust sensing-server launched by run.cmd, which pins both ports into the
+  // host's allocatable range. Without this the lookup misses and the WS URL
+  // falls back to the HTTP port, so the Sensing tab never connects.
+  '8774': '8775',
 };
 
 export function buildSensingWsUrl(locationLike = (typeof window !== 'undefined' ? window.location : null)) {

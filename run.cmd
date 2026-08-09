@@ -28,6 +28,15 @@ REM the hard guard past the measured spread, per the upstream escape hatch.
 REM Remove these two lines if firmware-side TDM ever lands.
 set "WDP_GUARD_INTERVAL_US=200000"
 set "WDP_SOFT_GUARD_US=100000"
+
+REM Bench layout in metres, as id:x,y,z. x is left/right and z is depth toward
+REM the viewer; y is carried for fusion geometry but ignored by the renderer,
+REM which maps position[0] to scene X and position[2] to scene Z. Node 3 sits
+REM 0.4 m forward of the node 1 / node 2 baseline, which keeps the array a true
+REM triangle -- three collinear nodes are degenerate for resolving position off
+REM the axis. Re-measure and edit these if the boards move.
+REM   node1 left (-0.6), node2 right (+0.6), node3 middle/forward (0, +0.4)
+set "SENSING_NODE_POSITIONS=1:-0.6,0,0;2:0.6,0,0;3:0,0,0.4"
 set "EXE=%ROOT%v2\target\release\sensing-server.exe"
 if not exist "%EXE%" set "EXE=%ROOT%v2\target\debug\sensing-server.exe"
 
