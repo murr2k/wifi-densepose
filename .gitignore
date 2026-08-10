@@ -39,6 +39,9 @@ rust-port/wifi-densepose-rs/data/recordings/
 # tracked from upstream; ignoring a path does not untrack what is committed.
 data/recordings/
 data/ground-truth/
+# align-ground-truth.js output: CSI paired with camera keypoints, so it is both
+# CSI and person data at once.
+data/paired/
 
 # NVS partition images and CSVs (contain WiFi credentials)
 nvs.bin

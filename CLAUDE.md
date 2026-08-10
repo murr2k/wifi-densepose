@@ -439,6 +439,46 @@ in MGMT+DATA promiscuous mode the nodes capture its frames: a node read
 sitting next to the array. Keep the camera well away from the boards, and prefer
 a USB webcam for any capture whose CSI is destined for training.
 
+### ADR-079 training pipeline: one fixed bug and two open methodology gaps
+
+P1-P6 are marked Done but P8 (training on real paired data) is Pending, so the
+halves had never been run against each other on real output. Running them
+surfaced three things.
+
+**Fixed: silent axis transposition between P2 and P3.**
+`align-ground-truth.js` emitted CSI as `[nFrames, nSc]` written frame-major,
+while `train-wiflow-supervised.js` documents and reads `[dim, T]`, indexing
+`csi[d * T + t]`. A `[20, 56]` window therefore trained as `csiDim=20, T=56`:
+the TCN's dilated causal convolutions ran across subcarriers while the 20 time
+frames became feature channels. No error was raised. Three sources agree the
+convention is `[dim, T]` — the trainer's comment, its TCN construction, and this
+file's own `csiMatrix_shapeLabel()` fallback of `[128, WINDOW_FRAMES]` — so the
+aligner was the wrong side and both extractors now write dim-major. Confirm a
+fix by checking the trainer prints `Time steps: 20` and
+`TCN(56->...)`, not `TCN(20->...)`.
+
+**Open: the train/eval split leaks.** `train-wiflow-supervised.js` splits with
+`shuffleArray(allSamples, 42)` then slices by index. Windows are 200 ms of one
+continuous session, so neighbours are near-duplicates and a random split puts
+them on both sides. Any resulting PCK is optimistically biased. A temporal split
+on `ts_start` (records carry it) is the fix. This contradicts the PCK rule in the
+non-negotiables above.
+
+**Open: no mean-pose baseline.** `eval-wiflow.js --baseline` evaluates the
+ADR-072 proxy-pose heuristic, not a mean-pose baseline. A constant average pose
+scores non-trivially on PCK, so without it a reported number cannot be shown to
+beat the trivial predictor. The non-negotiables require the mean-pose baseline
+specifically.
+
+Practical figures measured on a 60 s three-node capture: 1301 camera frames and
+8586 CSI frames produced 429 windows and 413 paired samples at a 96.3 %
+alignment rate with no clock-offset correction needed, so a 30-minute session
+yields roughly 12k samples and about 2 GB of CSI. Camera framing dominates label
+quality: a head-and-shoulders shot gave 8.0/17 visible joints and 76 % pose
+detection, while framing full body head-to-ankle gave 15.7/17 and 100 %.
+`scripts/collect-ground-truth.py` needs `cv2`, `mediapipe` and `numpy`, and
+auto-downloads `pose_landmarker_lite.task` into `data/.cache/`.
+
 ### Host workflow hazards on Windows
 
 - **Editing a precached UI asset requires bumping `CACHE_NAME` in `ui/sw.js`.**

@@ -375,20 +375,30 @@ function extractCsiMatrix(window) {
   const nSc = window[0].subcarriers || 128;
   const matrix = new Float32Array(nSc * nFrames);
 
+  // Written subcarrier-major as [dim, T], i.e. element (s, f) at s * nFrames + f.
+  // train-wiflow-supervised.js reads `csi_shape[0]` as the feature dimension and
+  // indexes `csi[d * T + t]`, and this file's own csiMatrix_shapeLabel() falls
+  // back to `[128, WINDOW_FRAMES]`, so [dim, T] is the convention on both sides.
+  // This previously emitted frame-major data with shape [nFrames, nSc], which
+  // the trainer silently consumed transposed: its dilated causal convolutions
+  // ran across subcarriers while the 20 time frames became feature channels. It
+  // trained without error on a scrambled representation. Never caught because
+  // ADR-079 P8 (training on real paired data) had not been run.
   for (let f = 0; f < nFrames; f++) {
     const frame = window[f];
     if (frame.amplitude && frame.amplitude.length > 0) {
       // Already-extracted amplitudes from sensing_update — copy directly.
       const n = Math.min(nSc, frame.amplitude.length);
-      for (let s = 0; s < n; s++) matrix[f * nSc + s] = frame.amplitude[s];
+      for (let s = 0; s < n; s++) matrix[s * nFrames + f] = frame.amplitude[s];
     } else if (frame.iqHex) {
       const iq = parseIqHex(frame.iqHex);
       const amp = extractAmplitude(iq, nSc);
-      matrix.set(amp, f * nSc);
+      const n = Math.min(nSc, amp.length);
+      for (let s = 0; s < n; s++) matrix[s * nFrames + f] = amp[s];
     }
   }
 
-  return { data: Array.from(matrix), shape: [nFrames, nSc] };
+  return { data: Array.from(matrix), shape: [nSc, nFrames] };
 }
 
 /**
@@ -401,14 +411,16 @@ function extractFeatureMatrix(window) {
   const dim = window[0].features ? window[0].features.length : 8;
   const matrix = new Float32Array(dim * nFrames);
 
+  // Feature-major as [dim, T], matching extractCsiMatrix and the trainer's
+  // `csi[d * T + t]` indexing. See the note there.
   for (let f = 0; f < nFrames; f++) {
     const feats = window[f].features || new Array(dim).fill(0);
     for (let d = 0; d < dim; d++) {
-      matrix[f * dim + d] = feats[d] || 0;
+      matrix[d * nFrames + f] = feats[d] || 0;
     }
   }
 
-  return { data: Array.from(matrix), shape: [nFrames, dim] };
+  return { data: Array.from(matrix), shape: [dim, nFrames] };
 }
 
 // ---------------------------------------------------------------------------
