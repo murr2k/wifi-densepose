@@ -457,18 +457,39 @@ aligner was the wrong side and both extractors now write dim-major. Confirm a
 fix by checking the trainer prints `Time steps: 20` and
 `TCN(56->...)`, not `TCN(20->...)`.
 
-**Open: the train/eval split leaks.** `train-wiflow-supervised.js` splits with
-`shuffleArray(allSamples, 42)` then slices by index. Windows are 200 ms of one
-continuous session, so neighbours are near-duplicates and a random split puts
-them on both sides. Any resulting PCK is optimistically biased. A temporal split
-on `ts_start` (records carry it) is the fix. This contradicts the PCK rule in the
-non-negotiables above.
+**Fixed: the train/eval split leaked.** `train-wiflow-supervised.js` shuffled
+with `shuffleArray(allSamples, 42)` before slicing. Windows are 200 ms of one
+continuous session, so neighbours are near-duplicates and a random split put them
+on both sides, inflating PCK. The split is now temporal by default, holding out a
+contiguous tail ordered by `ts_start` (parsed to epoch ms, since the aligner
+writes ISO strings). It prints the mode and the held-out boundary. Use
+`--shuffle-split` only for datasets assembled from genuinely independent
+sessions; it warns when used.
 
-**Open: no mean-pose baseline.** `eval-wiflow.js --baseline` evaluates the
-ADR-072 proxy-pose heuristic, not a mean-pose baseline. A constant average pose
-scores non-trivially on PCK, so without it a reported number cannot be shown to
-beat the trivial predictor. The non-negotiables require the mean-pose baseline
-specifically.
+**Fixed: added a mean-pose baseline.** `eval-wiflow.js --baseline` evaluates the
+ADR-072 proxy skeleton, which is not the mean-pose baseline the non-negotiables
+require. `--mean-pose` now predicts the dataset average for every sample, with
+`--mean-from <train.paired.jsonl>` to derive the mean from the training split
+rather than the evaluated data (it warns when they are the same).
+
+**The measured floor matters more than it sounds.** On a 60 s three-node capture:
+
+| Baseline | PCK@10 | PCK@20 | MPJPE |
+|---|---|---|---|
+| Mean pose | 4.2 % | **14.9 %** | 0.134 |
+| Proxy skeleton (ADR-072) | 1.0 % | 5.1 % | 0.199 |
+
+Predicting a constant average pose beat the proxy heuristic by roughly 3x. So
+ADR-079's framing of 2.5 % now versus a 35 % target is not a 14x gain against
+nothing: the floor is around 15 % on data like this, the target is about 2.3x the
+floor, and **any model under about 15 % is worse than predicting nothing**.
+Re-measure the floor per dataset — it was inflated here by a single session where
+the subject stayed in one area, and should fall as movement varies.
+
+Unrelated pre-existing crash: the supervised phase throws
+`Cannot read properties of undefined (reading 'toFixed')` when supervised epochs
+are fewer than the 4 curriculum stages, so `--epochs 2` fails while `--epochs 12`
+is fine. Only bites low-epoch smoke tests.
 
 Practical figures measured on a 60 s three-node capture: 1301 camera frames and
 8586 CSI frames produced 429 windows and 413 paired samples at a 96.3 %

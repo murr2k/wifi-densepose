@@ -61,6 +61,8 @@ const { values: args } = parseArgs({
     model:    { type: 'string', short: 'm' },
     data:     { type: 'string', short: 'd' },
     baseline: { type: 'boolean', default: false },
+    'mean-pose': { type: 'boolean', default: false },
+    'mean-from': { type: 'string' },
     output:   { type: 'string', short: 'o' },
     verbose:  { type: 'boolean', short: 'v', default: false },
   },
@@ -75,14 +77,20 @@ if (!args.data) {
   console.error('');
   console.error('Options:');
   console.error('  --model, -m <path>   Path to trained model directory or JSON');
-  console.error('  --baseline           Evaluate proxy-based baseline (no model)');
+  console.error('  --baseline           Evaluate the ADR-072 proxy skeleton baseline (no model)');
+  console.error('  --mean-pose          Evaluate the mean-pose baseline: predict the dataset');
+  console.error('                       average pose for every sample. This is the floor a');
+  console.error('                       real model must beat, and is required alongside any');
+  console.error('                       PCK claim.');
+  console.error('  --mean-from <file>   Compute the mean pose from this paired file (the');
+  console.error('                       training split) instead of the data being evaluated.');
   console.error('  --output, -o <path>  Output eval report JSON');
   console.error('  --verbose, -v        Verbose output');
   process.exit(1);
 }
 
-if (!args.model && !args.baseline) {
-  console.error('Error: Must specify either --model <path> or --baseline');
+if (!args.model && !args.baseline && !args['mean-pose']) {
+  console.error('Error: Must specify one of --model <path>, --baseline, or --mean-pose');
   process.exit(1);
 }
 
@@ -299,6 +307,51 @@ function generateBaselinePose(sample) {
 // ---------------------------------------------------------------------------
 
 /** Euclidean distance between two 2D points */
+/**
+ * Mean-pose baseline: the dataset's average keypoint positions, predicted
+ * constantly for every sample.
+ *
+ * This is the floor a real model has to clear. A static average pose scores
+ * non-trivially on PCK because human poses cluster — heads sit near the top of
+ * frame, hips near the middle — so a model's PCK is only evidence that it
+ * learned something if it beats this number. The non-negotiables in CLAUDE.md
+ * require reporting it alongside any PCK claim.
+ *
+ * Distinct from generateBaselinePose(), which is the ADR-072 presence-driven
+ * proxy skeleton and varies per sample.
+ *
+ * Returns a flat [x0,y0,x1,y1,...] Float32Array, the prediction shape
+ * computeMetrics() indexes as pred[k*2], pred[k*2+1].
+ */
+function computeMeanPose(samples) {
+  const sum = new Float64Array(NUM_KEYPOINTS * 2);
+  const count = new Float64Array(NUM_KEYPOINTS);
+
+  for (const s of samples) {
+    const kp = s.kp;
+    if (!Array.isArray(kp)) continue;
+    for (let k = 0; k < Math.min(NUM_KEYPOINTS, kp.length); k++) {
+      const p = kp[k];
+      if (!Array.isArray(p) || p.length < 2) continue;
+      const x = Number(p[0]);
+      const y = Number(p[1]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      sum[k * 2] += x;
+      sum[k * 2 + 1] += y;
+      count[k] += 1;
+    }
+  }
+
+  const mean = new Float32Array(NUM_KEYPOINTS * 2);
+  for (let k = 0; k < NUM_KEYPOINTS; k++) {
+    if (count[k] > 0) {
+      mean[k * 2] = sum[k * 2] / count[k];
+      mean[k * 2 + 1] = sum[k * 2 + 1] / count[k];
+    }
+  }
+  return mean;
+}
+
 function dist2d(x1, y1, x2, y2) {
   const dx = x1 - x2;
   const dy = y1 - y2;
@@ -543,8 +596,27 @@ function main() {
 
   let modelName;
   let model = null;
+  let meanPose = null;
 
-  if (args.baseline) {
+  if (args['mean-pose']) {
+    modelName = 'baseline-mean-pose';
+    let meanSource = samples;
+    if (args['mean-from']) {
+      meanSource = loadPairedData(args['mean-from']);
+      if (args.verbose) {
+        console.log(`Mean pose computed from ${meanSource.length} samples in ${args['mean-from']}`);
+      }
+    } else {
+      // Computing the mean on the same data it is scored against flatters the
+      // baseline, which makes the model look worse by comparison. Warn rather
+      // than refuse, since a quick single-file check is still informative.
+      console.error('WARNING: mean pose computed from the data being evaluated, which');
+      console.error('         flatters the baseline. Pass --mean-from <train.paired.jsonl>');
+      console.error('         to derive it from the training split instead.');
+    }
+    meanPose = computeMeanPose(meanSource);
+    if (args.verbose) console.log('Running mean-pose baseline evaluation');
+  } else if (args.baseline) {
     modelName = 'baseline-proxy';
     if (args.verbose) console.log('Running baseline proxy evaluation (ADR-072 Phase 2 heuristic)');
   } else {
@@ -560,7 +632,9 @@ function main() {
 
   for (const sample of samples) {
     let pred;
-    if (args.baseline) {
+    if (args['mean-pose']) {
+      pred = meanPose;
+    } else if (args.baseline) {
       pred = generateBaselinePose(sample);
     } else {
       pred = runModelInference(model, sample);

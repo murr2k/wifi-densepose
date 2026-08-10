@@ -73,6 +73,7 @@ const { values: args } = parseArgs({
     lr:                { type: 'string',              default: '0.0001' },
     'skip-contrastive': { type: 'boolean',            default: false },
     'eval-split':      { type: 'string',              default: '0.2' },
+    'shuffle-split':   { type: 'boolean',            default: false },
     scale:             { type: 'string',  short: 's', default: 'lite' },
     verbose:           { type: 'boolean', short: 'v', default: false },
   },
@@ -90,6 +91,9 @@ if (!args.data) {
   console.error('  --lr <float>           Learning rate (default: 0.0001)');
   console.error('  --skip-contrastive     Skip phase 1 contrastive pretraining');
   console.error('  --eval-split <float>   Held-out eval fraction (default: 0.2)');
+  console.error('  --shuffle-split        Shuffle before splitting instead of holding out a');
+  console.error('                         contiguous tail. Leaks when samples are consecutive');
+  console.error('                         windows from one session; only valid across sessions.');
   console.error('  --verbose              Print detailed progress');
   process.exit(1);
 }
@@ -102,6 +106,7 @@ const CONFIG = {
   lr:               parseFloat(args.lr),
   skipContrastive:  args['skip-contrastive'],
   evalSplit:        parseFloat(args['eval-split']),
+  shuffleSplit:     args['shuffle-split'],
   verbose:          args.verbose,
 
   // Phase epoch allocation (scaled to totalEpochs)
@@ -661,6 +666,23 @@ function augmentSample(sample, rng, T) {
 }
 
 // ---------------------------------------------------------------------------
+/**
+ * Normalize a sample timestamp to epoch milliseconds for ordering.
+ *
+ * The aligner writes `ts_start` as an ISO-8601 string; other producers may use a
+ * numeric epoch. Parsing rather than comparing strings avoids depending on both
+ * sides having identical ISO formatting. Unparseable values sort first, which
+ * keeps them out of the held-out tail.
+ */
+function tsToMs(ts) {
+  if (typeof ts === 'number') return ts;
+  if (typeof ts === 'string') {
+    const parsed = Date.parse(ts);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return 0;
+}
+
 // Deterministic shuffle
 // ---------------------------------------------------------------------------
 
@@ -1269,12 +1291,35 @@ async function main() {
     console.log(`  [O8] Person-separable subcarrier groups identified for multi-person training`);
   }
 
-  // Train/eval split
-  const shuffled = shuffleArray(allSamples, 42);
-  const splitIdx = Math.floor(shuffled.length * (1 - CONFIG.evalSplit));
-  const trainSet = shuffled.slice(0, splitIdx);
-  const evalSet  = shuffled.slice(splitIdx);
+  // Train/eval split — temporal by default, not shuffled.
+  //
+  // A window is 200 ms of one continuous recording session, so consecutive
+  // samples are near-duplicates: same pose, same position, nearly identical
+  // CSI. Shuffling before slicing puts those neighbours on both sides of the
+  // split, the model sees the eval set's twins during training, and the
+  // resulting PCK is optimistically biased. CLAUDE.md requires a leakage-free
+  // held-out split for any PCK claim. Holding out a contiguous tail by
+  // timestamp is the standard remedy for time-series data.
+  //
+  // --shuffle-split restores the old behaviour, which is legitimate only when
+  // the dataset is assembled from genuinely independent sessions.
+  let ordered;
+  if (CONFIG.shuffleSplit) {
+    ordered = shuffleArray(allSamples, 42);
+    console.log('  Split: RANDOM SHUFFLE — PCK will be inflated if samples are');
+    console.log('         consecutive windows from one session (--shuffle-split)');
+  } else {
+    ordered = allSamples.slice().sort((a, b) => tsToMs(a.timestamp) - tsToMs(b.timestamp));
+    console.log('  Split: temporal (contiguous held-out tail)');
+  }
+  const splitIdx = Math.floor(ordered.length * (1 - CONFIG.evalSplit));
+  const trainSet = ordered.slice(0, splitIdx);
+  const evalSet  = ordered.slice(splitIdx);
   console.log(`  Train: ${trainSet.length}  Eval: ${evalSet.length}`);
+  if (!CONFIG.shuffleSplit && evalSet.length > 0) {
+    const boundary = evalSet[0].timestamp;
+    console.log(`  Eval covers everything at or after: ${boundary}`);
+  }
   console.log('');
 
   // -----------------------------------------------------------------------
