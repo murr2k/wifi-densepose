@@ -31,6 +31,15 @@ firmware/esp32-csi-node/test/*.obj
 # CSI recordings (local training data, machine-specific)
 rust-port/wifi-densepose-rs/data/recordings/
 
+# Live CSI recordings and ADR-079 camera ground truth. CLAUDE.md forbids
+# committing CSI or person data, and the rule above only covers a stale
+# rust-port path, so the paths the running server and collector actually write
+# were uncovered. Camera-derived keypoints are person data by definition.
+# NOTE: data/recordings/*.csi.jsonl files predating this rule are already
+# tracked from upstream; ignoring a path does not untrack what is committed.
+data/recordings/
+data/ground-truth/
+
 # NVS partition images and CSVs (contain WiFi credentials)
 nvs.bin
 nvs_config.csv

@@ -409,6 +409,36 @@ ground truth, not a measurement** — nodes do not self-locate, so the markers s
 which blob is which board and nothing more. Stale coordinates after moving a
 board make the display actively wrong.
 
+### A node stuck in `NO_AP_FOUND` needs a power cycle, not a reset
+
+A node that loses WiFi retries 10 times, gives up permanently, and never
+rescans, so it cannot self-heal. Recovering it is fussier than it looks:
+measured on a board that dropped mid-capture while two identical boards 0.6 m
+away stayed associated on the same SSID and channel.
+
+| Attempt | Result |
+|---|---|
+| COM port still enumerated | rules out USB power / cable |
+| RTS reset (`EN` pin), 3 times | `reason=201 NO_AP_FOUND rssi=-128` every time |
+| Re-provision NVS (rewrite + reset) | same |
+| **USB power cycle** | **associated immediately, resumed as mesh leader** |
+
+`phy_init` loads and the firmware runs normally throughout, so the symptom looks
+like a dead radio while being nothing of the sort. `rssi=-128` is the
+unpopulated sentinel that accompanies `NO_AP_FOUND`, not a measurement. Do not
+burn attempts on repeated RTS resets; pull power. Thermal was ruled out here
+(boards were cool), as was a stale NVS config.
+
+### Streaming-camera ground truth contaminates the band being sensed
+
+The ADR-079 collector needs a camera the sensing volume is visible from, and a
+phone over Windows 11 Connected Camera works with no code change. But a phone
+streaming 720p video sits on the same 2.4 GHz band the nodes are measuring, and
+in MGMT+DATA promiscuous mode the nodes capture its frames: a node read
+**-19 dBm during a capture and -51 dBm immediately after**, with the phone
+sitting next to the array. Keep the camera well away from the boards, and prefer
+a USB webcam for any capture whose CSI is destined for training.
+
 ### Host workflow hazards on Windows
 
 - **Editing a precached UI asset requires bumping `CACHE_NAME` in `ui/sw.js`.**
